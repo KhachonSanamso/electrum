@@ -69,25 +69,29 @@ class Plugins(DaemonThread):
         self.gui_name = gui_name
         self.descriptions = {}
         self.device_manager = DeviceMgr(config)
+
+        path_root = self.config.electrum_path_root()
+        self.user_pkgpath = os.path.join(path_root, 'plugins')
+        sys.path.append(self.user_pkgpath)
+        if not os.path.exists(self.user_pkgpath):
+            os.mkdir(self.user_pkgpath)
         self.load_plugins()
         self.add_jobs(self.device_manager.thread_jobs())
         self.start()
 
-    @classmethod
-    def find_all_plugins(cls) -> Mapping[str, dict]:
+    def find_all_plugins(self) -> Mapping[str, dict]:
         """Return a map of all found plugins: name -> description.
         Note that plugins not available for the current GUI are also included.
         """
-        if cls._all_found_plugins is None:
-            cls._all_found_plugins = dict()
-            iter_modules = list(pkgutil.iter_modules([cls.pkgpath]))
+        def read_plugins(pkgpath):
+            iter_modules = list(pkgutil.iter_modules([pkgpath]))
             for loader, name, ispkg in iter_modules:
                 # FIXME pyinstaller binaries are packaging each built-in plugin twice:
                 #       once as data and once as code. To honor the "no duplicates" rule below,
                 #       we exclude the ones packaged as *code*, here:
                 if loader.__class__.__qualname__ == "FrozenImporter":
                     continue
-                full_name = f'electrum.plugins.{name}'
+                full_name = f'{name}' if pkgpath==self.user_pkgpath else f'electrum.plugins.{name}'
                 spec = importlib.util.find_spec(full_name)
                 if spec is None:  # pkgutil found it but importlib can't ?!
                     raise Exception(f"Error pre-loading {full_name}: no spec")
@@ -100,11 +104,16 @@ class Plugins(DaemonThread):
                 except Exception as e:
                     raise Exception(f"Error pre-loading {full_name}: {repr(e)}") from e
                 d = module.__dict__
-                if name in cls._all_found_plugins:
+                if name in self._all_found_plugins:
                     _logger.info(f"Found the following plugin modules: {iter_modules=}")
                     raise Exception(f"duplicate plugins? for {name=}")
-                cls._all_found_plugins[name] = d
-        return cls._all_found_plugins
+                self._all_found_plugins[name] = d
+
+        if self._all_found_plugins is None:
+            self._all_found_plugins = dict()
+            read_plugins(self.pkgpath)
+            read_plugins(self.user_pkgpath)
+        return self._all_found_plugins
 
     def load_plugins(self):
         for name, d in self.find_all_plugins().items():
@@ -133,7 +142,8 @@ class Plugins(DaemonThread):
     def load_plugin(self, name) -> 'BasePlugin':
         if name in self.plugins:
             return self.plugins[name]
-        full_name = f'electrum.plugins.{name}.{self.gui_name}'
+        d = self.descriptions[name]
+        full_name = d['__name__'] + f'.{self.gui_name}'
         spec = importlib.util.find_spec(full_name)
         if spec is None:
             raise RuntimeError("%s implementation for %s plugin not found"
@@ -170,12 +180,9 @@ class Plugins(DaemonThread):
 
     @classmethod
     def is_plugin_enabler_config_key(cls, key: str) -> bool:
-        if not key.startswith('use_'):
-            return False
-        # note: the 'use_' prefix is not sufficient to check, there are
-        #       non-plugin-related config keys that also have it... hence:
-        name = key[4:]
-        return name in cls.find_all_plugins()
+        # fixme: the 'use_' prefix is not sufficient to check, there are
+        #         non-plugin-related config keys that also have it.
+        return key.startswith('use_')
 
     def toggle(self, name: str) -> Optional['BasePlugin']:
         p = self.get(name)
