@@ -67,17 +67,19 @@ class Plugins(DaemonThread):
         self.hw_wallets = {}
         self.plugins = {}  # type: Dict[str, BasePlugin]
         self.gui_name = gui_name
-        self.descriptions = {}
         self.device_manager = DeviceMgr(config)
 
-        path_root = self.config.electrum_path_root()
-        self.user_pkgpath = os.path.join(path_root, 'plugins')
+        self.user_pkgpath = os.path.join(self.config.electrum_path_root(), 'plugins')
         sys.path.append(self.user_pkgpath)
         if not os.path.exists(self.user_pkgpath):
             os.mkdir(self.user_pkgpath)
         self.load_plugins()
         self.add_jobs(self.device_manager.thread_jobs())
         self.start()
+
+    @property
+    def descriptions(self):
+        return self.find_all_plugins()
 
     def find_all_plugins(self) -> Mapping[str, dict]:
         """Return a map of all found plugins: name -> description.
@@ -104,6 +106,8 @@ class Plugins(DaemonThread):
                 except Exception as e:
                     raise Exception(f"Error pre-loading {full_name}: {repr(e)}") from e
                 d = module.__dict__
+                if 'fullname' not in d:
+                    continue
                 if name in self._all_found_plugins:
                     _logger.info(f"Found the following plugin modules: {iter_modules=}")
                     raise Exception(f"duplicate plugins? for {name=}")
@@ -126,7 +130,7 @@ class Plugins(DaemonThread):
             details = d.get('registers_keystore')
             if details:
                 self.register_keystore(name, gui_good, details)
-            self.descriptions[name] = d
+
             if not d.get('requires_wallet_type') and self.config.get('use_' + name):
                 try:
                     self.load_plugin(name)
@@ -142,7 +146,7 @@ class Plugins(DaemonThread):
     def load_plugin(self, name) -> 'BasePlugin':
         if name in self.plugins:
             return self.plugins[name]
-        d = self.descriptions[name]
+        d = self._all_found_plugins[name]
         full_name = d['__name__'] + f'.{self.gui_name}'
         spec = importlib.util.find_spec(full_name)
         if spec is None:
@@ -189,7 +193,7 @@ class Plugins(DaemonThread):
         return self.disable(name) if p else self.enable(name)
 
     def is_available(self, name: str, wallet: 'Abstract_Wallet') -> bool:
-        d = self.descriptions.get(name)
+        d = self._all_found_plugins.get(name)
         if not d:
             return False
         deps = d.get('requires', [])
